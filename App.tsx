@@ -1,4 +1,5 @@
-import React, { useState, useRef } from 'react';
+
+import React, { useState, useRef, useEffect } from 'react';
 import * as XLSX from 'xlsx';
 import { 
   IconCpu, 
@@ -16,47 +17,70 @@ import { analyzeRepairIssue } from './services/geminiService';
 import { AppState, RepairAnalysis } from './types';
 import MarkdownRenderer from './components/MarkdownRenderer';
 
+// Removed explicit declaration of window.aistudio to avoid conflicts with ambient types like AIStudio
+// Instead, we use (window as any).aistudio to access the pre-configured object.
+
 type ViewMode = 'diagnose' | 'library';
 
 interface LibraryItem {
   id: string;
-  name: string;      // 设备名称/标题
+  name: string;
   category: string;
   description: string;
-  analysis?: string; // 现有的问题分析/维修方案
+  analysis?: string;
 }
 
 interface ImageAttachment {
     id: string;
-    data: string; // Base64
+    data: string;
     mimeType: string;
 }
 
 const App: React.FC = () => {
   const [appState, setAppState] = useState<AppState>(AppState.IDLE);
   const [viewMode, setViewMode] = useState<ViewMode>('diagnose');
+  const [hasKey, setHasKey] = useState<boolean>(true);
   
   // Diagnosis State
   const [description, setDescription] = useState('');
   const [images, setImages] = useState<ImageAttachment[]>([]);
   const [analysisResult, setAnalysisResult] = useState<RepairAnalysis | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [isLibraryView, setIsLibraryView] = useState(false); // Flag to indicate if we are viewing a library item
+  const [isLibraryView, setIsLibraryView] = useState(false);
   const imageInputRef = useRef<HTMLInputElement>(null);
   
   // Library State
   const [libraryItems, setLibraryItems] = useState<LibraryItem[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // --- Diagnosis Logic ---
+  // 初始化检查 API Key
+  useEffect(() => {
+    const checkKey = async () => {
+      // Accessing aistudio via casting to any to satisfy TypeScript while avoiding type clashes
+      const aistudio = (window as any).aistudio;
+      if (aistudio && typeof aistudio.hasSelectedApiKey === 'function') {
+        const selected = await aistudio.hasSelectedApiKey();
+        setHasKey(selected);
+      }
+    };
+    checkKey();
+  }, []);
+
+  const handleOpenKeySelector = async () => {
+    // Accessing aistudio via casting to any to satisfy TypeScript while avoiding type clashes
+    const aistudio = (window as any).aistudio;
+    if (aistudio && typeof aistudio.openSelectKey === 'function') {
+      await aistudio.openSelectKey();
+      // Assume success after triggering key selection dialog to avoid race conditions
+      setHasKey(true); 
+    }
+  };
 
   const handleImageSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
       const files = event.target.files;
       if (!files) return;
-
       Array.from(files).forEach((file: File) => {
           if (!file.type.startsWith('image/')) return;
-          
           const reader = new FileReader();
           reader.onloadend = () => {
               const base64String = (reader.result as string).split(',')[1];
@@ -88,12 +112,10 @@ const App: React.FC = () => {
 
     try {
       const apiImages = images.map(img => ({ data: img.data, mimeType: img.mimeType }));
-      
-      // Build clearer knowledge base context
       let kbContext = undefined;
       if (libraryItems.length > 0) {
           kbContext = libraryItems.map((item, index) => 
-            `【案例 ${index + 1}】\n设备/型号: ${item.name}\n历史故障现象: ${item.description}\n历史问题分析与方案: ${item.analysis || '暂无存档'}`
+            `【案例 ${index + 1}】\n设备/型号: ${item.name}\n现象: ${item.description}\n方案: ${item.analysis || '无'}`
           ).join('\n---\n');
       }
 
@@ -101,10 +123,41 @@ const App: React.FC = () => {
       setAnalysisResult(result);
       setAppState(AppState.SUCCESS);
     } catch (err: any) {
-      setErrorMsg(err.message || "分析失败，请检查网络连接");
+      if (err.message === "API_KEY_INVALID") {
+        setHasKey(false);
+        setErrorMsg("API Key 已失效或未找到，请重新授权。");
+      } else {
+        setErrorMsg(err.message || "分析失败，请检查网络连接");
+      }
       setAppState(AppState.ERROR);
     }
   };
+
+  if (!hasKey) {
+    return (
+      <div className="min-h-screen bg-tech-blue flex items-center justify-center p-4">
+        <div className="max-w-md w-full bg-slate-800 border border-gray-700 rounded-3xl p-8 text-center shadow-2xl">
+          <div className="w-20 h-20 bg-circuit-teal/10 rounded-2xl flex items-center justify-center mx-auto mb-6">
+            <IconCpu className="w-10 h-10 text-circuit-teal" />
+          </div>
+          <h2 className="text-2xl font-bold text-white mb-4">专家系统访问受限</h2>
+          <p className="text-gray-400 mb-8 leading-relaxed">
+            为了访问 <strong>Gemini 3.0 Pro</strong> 专家诊断引擎，您需要先授权您的 API Key。
+          </p>
+          <button 
+            onClick={handleOpenKeySelector}
+            className="w-full py-4 bg-circuit-teal hover:bg-teal-400 text-slate-900 font-bold rounded-xl transition-all shadow-lg shadow-teal-900/20 mb-4"
+          >
+            授权 API Key
+          </button>
+          <p className="text-xs text-gray-500">
+            需要使用已开启计费的 Google Cloud 项目 Key。<br/>
+            <a href="https://ai.google.dev/gemini-api/docs/billing" target="_blank" className="underline hover:text-circuit-teal">了解计费说明</a>
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   const resetApp = () => {
     setAppState(AppState.IDLE);
@@ -114,15 +167,11 @@ const App: React.FC = () => {
     setIsLibraryView(false);
   };
 
-  // --- Library / File Upload Logic ---
-
   const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
-
     const fileName = file.name.toLowerCase();
     setErrorMsg(null);
-
     if (fileName.endsWith('.json')) {
         handleJsonUpload(file);
     } else if (fileName.endsWith('.xlsx') || fileName.endsWith('.xls')) {
@@ -139,10 +188,10 @@ const App: React.FC = () => {
       try {
         const content = e.target?.result as string;
         const json = JSON.parse(content);
-        if (!Array.isArray(json)) throw new Error("JSON 格式错误：根元素必须是数组");
+        if (!Array.isArray(json)) throw new Error("格式错误");
         processLibraryData(json);
       } catch (err: any) {
-        setErrorMsg(`JSON 解析失败: ${err.message}`);
+        setErrorMsg(`解析失败`);
       }
     };
     reader.readAsText(file);
@@ -154,13 +203,12 @@ const App: React.FC = () => {
           try {
               const data = new Uint8Array(e.target?.result as ArrayBuffer);
               const workbook = XLSX.read(data, { type: 'array' });
-              if (workbook.SheetNames.length === 0) throw new Error("Excel 文件为空");
               const firstSheetName = workbook.SheetNames[0];
               const worksheet = workbook.Sheets[firstSheetName];
               const jsonData = XLSX.utils.sheet_to_json(worksheet);
               processLibraryData(jsonData);
           } catch (err: any) {
-              setErrorMsg(`Excel 解析失败: ${err.message}`);
+              setErrorMsg(`Excel 解析失败`);
           }
       };
       reader.readAsArrayBuffer(file);
@@ -176,85 +224,44 @@ const App: React.FC = () => {
   };
 
   const processLibraryData = (data: any[]) => {
-      let validCount = 0;
       const items: LibraryItem[] = data.map((item: any, index) => {
              const desc = findValue(item, ['description', '描述', '故障', '故障描述', '问题', '现象', 'issue']);
              if (!desc) return null;
              const name = findValue(item, ['name', '名称', '设备', '设备名称', '器件', '标题', 'title']) || '未知设备';
-             const cat = findValue(item, ['category', '分类', '类别', 'type']) || '未分类';
              const analysis = findValue(item, ['analysis', '分析', '问题分析', '解决方案', '维修方案', '处理方法', 'solution', 'fix']);
-             validCount++;
-             return {
-                 id: `lib-${Date.now()}-${index}`,
-                 name, category: cat, description: desc, analysis
-             };
+             return { id: `lib-${Date.now()}-${index}`, name, category: '历史存档', description: desc, analysis };
         }).filter(Boolean) as LibraryItem[];
-
-        if (validCount === 0) {
-            setErrorMsg("未找到有效数据。请确保文件中包含“故障描述”相关列。");
-            return;
-        }
         setLibraryItems(items);
-        setErrorMsg(null);
   };
 
   const selectLibraryItem = (item: LibraryItem) => {
     setDescription(item.description);
     setImages([]); 
-    
     if (item.analysis) {
-        // Show archive first
         setAnalysisResult({
-            diagnosis: "Library Archive",
-            rawText: `## ${item.name} - 存档方案\n\n**故障描述**：${item.description}\n\n---\n\n### 📚 知识库存档方案\n\n${item.analysis}\n\n> 💡 *提示：您可以点击下方按钮让 AI 结合最新互联网信息对该方案进行验证和扩充。*`,
+            diagnosis: "Archive",
+            rawText: `## ${item.name} - 存档方案\n\n**故障描述**：${item.description}\n\n---\n\n### 📚 知识库存档方案\n\n${item.analysis}`,
             sources: []
         });
         setAppState(AppState.SUCCESS);
         setIsLibraryView(true);
     } else {
-        // No analysis, jump straight to AI diagnostic
         handleSubmit(item.description);
     }
-    
     setViewMode('diagnose');
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  };
-
-  const handleReAnalyze = () => {
-      setIsLibraryView(false);
-      handleSubmit();
   };
 
   return (
-    <div className="min-h-screen flex flex-col relative overflow-hidden">
-      <div className="absolute top-0 left-0 w-full h-full pointer-events-none z-0">
-        <div className="absolute top-[-10%] right-[-10%] w-96 h-96 bg-circuit-teal/10 rounded-full blur-3xl"></div>
-        <div className="absolute bottom-[-10%] left-[-10%] w-96 h-96 bg-blue-600/10 rounded-full blur-3xl"></div>
-      </div>
-
+    <div className="min-h-screen flex flex-col relative overflow-hidden bg-tech-blue">
       <header className="relative z-10 border-b border-gray-800 bg-slate-900/80 backdrop-blur-md sticky top-0">
         <div className="max-w-4xl mx-auto px-4 py-4 flex items-center justify-between">
           <div className="flex items-center space-x-3 text-circuit-teal cursor-pointer" onClick={() => { setViewMode('diagnose'); resetApp(); }}>
-            <div className="bg-circuit-teal/20 p-2 rounded-lg">
-                <IconCpu className="w-6 h-6" />
-            </div>
+            <div className="bg-circuit-teal/20 p-2 rounded-lg"><IconCpu className="w-6 h-6" /></div>
             <h1 className="text-2xl font-bold tracking-tight text-white">产品部维修<span className="text-circuit-teal">专家</span></h1>
           </div>
           <div className="flex space-x-1 bg-slate-800 p-1 rounded-lg">
-             <button 
-                onClick={() => setViewMode('diagnose')}
-                className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors flex items-center gap-2 ${viewMode === 'diagnose' ? 'bg-slate-700 text-white shadow' : 'text-gray-400 hover:text-gray-200'}`}
-             >
-                <IconWrench className="w-4 h-4" />
-                智能诊断
-             </button>
-             <button 
-                onClick={() => setViewMode('library')}
-                className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors flex items-center gap-2 ${viewMode === 'library' ? 'bg-slate-700 text-white shadow' : 'text-gray-400 hover:text-gray-200'}`}
-             >
-                <IconList className="w-4 h-4" />
-                问题库
-             </button>
+             <button onClick={() => setViewMode('diagnose')} className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${viewMode === 'diagnose' ? 'bg-slate-700 text-white shadow' : 'text-gray-400 hover:text-gray-200'}`}>智能诊断</button>
+             <button onClick={() => setViewMode('library')} className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${viewMode === 'library' ? 'bg-slate-700 text-white shadow' : 'text-gray-400 hover:text-gray-200'}`}>问题库</button>
           </div>
         </div>
       </header>
@@ -262,168 +269,64 @@ const App: React.FC = () => {
       <main className="flex-grow relative z-10 container mx-auto px-4 py-8 max-w-4xl">
         {viewMode === 'diagnose' && (
             <>
-                {appState === AppState.IDLE || appState === AppState.ERROR ? (
+                {(appState === AppState.IDLE || appState === AppState.ERROR) && (
                     <div className="space-y-8 animate-fade-in">
                         <div className="text-center space-y-4 mb-12">
                             <h2 className="text-3xl md:text-4xl font-extrabold text-white">
-                                您的智能<span className="text-transparent bg-clip-text bg-gradient-to-r from-circuit-teal to-blue-500">电子维修专家</span>
+                                智能<span className="text-transparent bg-clip-text bg-gradient-to-r from-circuit-teal to-blue-500">电子维修专家</span>
                             </h2>
-                            <p className="text-gray-400 max-w-2xl mx-auto text-lg">
-                                上传设备故障照片或描述问题，AI 将自动检索自建知识库条目，并结合互联网技术手册输出深度维修方案。
-                            </p>
+                            <p className="text-gray-400 max-w-2xl mx-auto text-lg">AI 深度学习您的自建知识库，并实时联网获取最新硬件原理图与故障指南。</p>
                         </div>
-
                         <div className="bg-slate-800/50 border border-gray-700 rounded-2xl p-6 md:p-8 shadow-xl backdrop-blur-sm">
                             <div className="mb-6">
-                                <label className="block text-sm font-medium text-gray-300 mb-2 flex items-center gap-2">
-                                    <IconWrench className="w-4 h-4 text-circuit-teal" />
-                                    故障描述
-                                </label>
-                                <textarea 
-                                    value={description}
-                                    onChange={(e) => setDescription(e.target.value)}
-                                    className="w-full bg-slate-900 border border-gray-700 rounded-xl p-4 text-white focus:ring-2 focus:ring-circuit-teal focus:border-transparent outline-none transition-all placeholder-gray-600 h-32 resize-none"
-                                    placeholder="例如：主板供电短路，或者电源指示灯闪烁但无电压输出... 系统将自动匹配历史维修案例。"
-                                />
+                                <label className="block text-sm font-medium text-gray-300 mb-2">故障描述</label>
+                                <textarea value={description} onChange={(e) => setDescription(e.target.value)} className="w-full bg-slate-900 border border-gray-700 rounded-xl p-4 text-white focus:ring-2 focus:ring-circuit-teal outline-none h-32 resize-none" placeholder="描述故障现象...系统将自动核对历史记录。" />
                             </div>
-
                             <div className="mb-8">
-                                <label className="block text-sm font-medium text-gray-300 mb-2 flex items-center gap-2">
-                                    <IconCamera className="w-4 h-4 text-circuit-teal" />
-                                    上传故障照片（可选，支持多张）
-                                </label>
+                                <label className="block text-sm font-medium text-gray-300 mb-2">上传故障照片</label>
                                 <div className="flex flex-wrap gap-3">
-                                    <div 
-                                        onClick={() => imageInputRef.current?.click()}
-                                        className="w-24 h-24 rounded-xl border-2 border-dashed border-gray-600 flex flex-col items-center justify-center cursor-pointer hover:border-circuit-teal hover:bg-slate-800 transition-colors text-gray-500 hover:text-circuit-teal"
-                                    >
-                                        <IconUpload className="w-6 h-6 mb-1" />
-                                        <span className="text-xs">添加图片</span>
-                                        <input 
-                                            type="file" 
-                                            ref={imageInputRef} 
-                                            accept="image/*" 
-                                            multiple 
-                                            className="hidden" 
-                                            onChange={handleImageSelect}
-                                        />
+                                    <div onClick={() => imageInputRef.current?.click()} className="w-24 h-24 rounded-xl border-2 border-dashed border-gray-600 flex flex-col items-center justify-center cursor-pointer hover:border-circuit-teal text-gray-500 hover:text-circuit-teal transition-all">
+                                        <IconUpload className="w-6 h-6 mb-1" /><span className="text-xs">添加</span>
+                                        <input type="file" ref={imageInputRef} accept="image/*" multiple className="hidden" onChange={handleImageSelect} />
                                     </div>
                                     {images.map((img) => (
                                         <div key={img.id} className="relative w-24 h-24 rounded-xl overflow-hidden border border-gray-700 group">
-                                            <img 
-                                                src={`data:${img.mimeType};base64,${img.data}`} 
-                                                alt="preview" 
-                                                className="w-full h-full object-cover"
-                                            />
-                                            <button 
-                                                onClick={() => removeImage(img.id)}
-                                                className="absolute top-1 right-1 bg-black/60 text-white rounded-full p-1 opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-500"
-                                            >
-                                                <IconX className="w-3 h-3" />
-                                            </button>
+                                            <img src={`data:${img.mimeType};base64,${img.data}`} alt="preview" className="w-full h-full object-cover" />
+                                            <button onClick={() => removeImage(img.id)} className="absolute top-1 right-1 bg-black/60 text-white rounded-full p-1 opacity-0 group-hover:opacity-100"><IconX className="w-3 h-3" /></button>
                                         </div>
                                     ))}
                                 </div>
                             </div>
-
-                            {errorMsg && (
-                                <div className="mb-6 p-4 bg-red-900/20 border border-red-800 rounded-xl flex items-start gap-3 text-red-200">
-                                    <IconAlert className="w-5 h-5 flex-shrink-0 mt-0.5" />
-                                    <span>{errorMsg}</span>
-                                </div>
-                            )}
-
-                            <button 
-                                onClick={() => handleSubmit()}
-                                disabled={!description.trim() && images.length === 0}
-                                className={`w-full py-4 rounded-xl font-bold text-lg flex items-center justify-center gap-3 transition-all transform active:scale-[0.98] ${
-                                    (description.trim() || images.length > 0)
-                                    ? 'bg-gradient-to-r from-circuit-teal to-blue-600 text-white shadow-lg shadow-blue-900/50 hover:shadow-blue-900/80 hover:brightness-110' 
-                                    : 'bg-gray-800 text-gray-500 cursor-not-allowed'
-                                }`}
-                            >
-                                <IconSearch className="w-5 h-5" />
-                                开始 AI 智能诊断
-                            </button>
-                        </div>
-                    </div>
-                ) : null}
-
-                {appState === AppState.ANALYZING && (
-                    <div className="flex flex-col items-center justify-center py-20 animate-fade-in">
-                        <div className="relative w-24 h-24 mb-8">
-                            <div className="absolute inset-0 border-4 border-gray-800 rounded-full"></div>
-                            <div className="absolute inset-0 border-4 border-t-circuit-teal border-r-transparent border-b-transparent border-l-transparent rounded-full animate-spin"></div>
-                            <div className="absolute inset-4 bg-slate-800 rounded-full flex items-center justify-center animate-pulse-fast">
-                                <IconCpu className="w-8 h-8 text-circuit-teal" />
-                            </div>
-                        </div>
-                        <h3 className="text-2xl font-bold text-white mb-2">正在分析中...</h3>
-                        <p className="text-gray-400 text-center max-w-md">
-                            正在查阅您的 <span className="text-circuit-teal font-bold">自建知识库</span>，并结合 AI 推理出最佳维修方案。
-                        </p>
-                        <div className="mt-8 flex gap-2">
-                            <span className="w-2 h-2 bg-circuit-teal rounded-full animate-bounce" style={{animationDelay: '0ms'}}></span>
-                            <span className="w-2 h-2 bg-circuit-teal rounded-full animate-bounce" style={{animationDelay: '150ms'}}></span>
-                            <span className="w-2 h-2 bg-circuit-teal rounded-full animate-bounce" style={{animationDelay: '300ms'}}></span>
+                            {errorMsg && <div className="mb-6 p-4 bg-red-900/20 border border-red-800 rounded-xl text-red-200">{errorMsg}</div>}
+                            <button onClick={() => handleSubmit()} className="w-full py-4 bg-gradient-to-r from-circuit-teal to-blue-600 text-white rounded-xl font-bold text-lg hover:brightness-110 shadow-lg">开始智能诊断</button>
                         </div>
                     </div>
                 )}
 
+                {appState === AppState.ANALYZING && (
+                    <div className="flex flex-col items-center justify-center py-20">
+                        <div className="relative w-24 h-24 mb-8">
+                            <div className="absolute inset-0 border-4 border-gray-800 rounded-full"></div>
+                            <div className="absolute inset-0 border-4 border-t-circuit-teal rounded-full animate-spin"></div>
+                            <div className="absolute inset-4 bg-slate-800 rounded-full flex items-center justify-center animate-pulse"><IconCpu className="w-8 h-8 text-circuit-teal" /></div>
+                        </div>
+                        <h3 className="text-2xl font-bold text-white">专家系统正在思考...</h3>
+                        <p className="text-gray-400">正在核对您的私有库并检索全球技术手册</p>
+                    </div>
+                )}
+
                 {appState === AppState.SUCCESS && analysisResult && (
-                    <div className="animate-fade-in space-y-6">
-                        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-4 gap-4">
+                    <div className="space-y-6">
+                        <div className="flex justify-between items-center">
                             <h2 className="text-2xl font-bold text-white flex items-center gap-2">
-                                <span className={`p-2 rounded-lg border ${isLibraryView ? 'bg-blue-500/10 text-blue-400 border-blue-500/20' : 'bg-green-500/10 text-green-400 border-green-500/20'}`}>
-                                    {isLibraryView ? <IconFileText className="w-5 h-5" /> : <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>}
-                                </span>
-                                {isLibraryView ? "知识库存档" : "AI 诊断方案"}
+                                <span className="p-2 bg-green-500/10 text-green-400 rounded-lg border border-green-500/20"><IconWrench className="w-5 h-5" /></span>
+                                {isLibraryView ? "历史存档方案" : "专家诊断方案"}
                             </h2>
-                            <div className="flex gap-3">
-                                {isLibraryView && (
-                                    <button 
-                                        onClick={handleReAnalyze}
-                                        className="px-4 py-2 text-sm bg-slate-700 hover:bg-circuit-teal hover:text-slate-900 text-white rounded-lg transition-colors font-medium flex items-center gap-2"
-                                    >
-                                        <IconCpu className="w-4 h-4" />
-                                        让 AI 结合知识库深化分析
-                                    </button>
-                                )}
-                                <button onClick={resetApp} className="px-4 py-2 text-sm text-gray-400 hover:text-white border border-transparent hover:border-gray-600 rounded-lg transition-all">
-                                    查询其他故障
-                                </button>
-                            </div>
+                            <button onClick={resetApp} className="text-sm text-gray-400 hover:text-white">诊断新故障</button>
                         </div>
-
                         <div className="bg-slate-800 border border-gray-700 rounded-2xl p-6 md:p-8 shadow-2xl relative overflow-hidden">
-                            <div className={`absolute top-0 left-0 w-full h-1 bg-gradient-to-r ${isLibraryView ? 'from-blue-500 via-purple-500 to-pink-500' : 'from-circuit-teal via-blue-500 to-purple-500'}`}></div>
+                            <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-circuit-teal to-blue-500"></div>
                             <MarkdownRenderer content={analysisResult.rawText} />
-                        </div>
-
-                        {analysisResult.sources && analysisResult.sources.length > 0 && !isLibraryView && (
-                            <div className="bg-slate-900/50 border border-gray-800 rounded-xl p-6">
-                                <h4 className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-4 flex items-center gap-2">
-                                    <IconLink className="w-4 h-4" />
-                                    参考资料与原理图来源
-                                </h4>
-                                <div className="grid gap-3 sm:grid-cols-2">
-                                    {analysisResult.sources.map((chunk, idx) => (
-                                        chunk.web ? (
-                                            <a key={idx} href={chunk.web.uri} target="_blank" rel="noopener noreferrer" className="flex items-start p-3 rounded-lg bg-slate-800 hover:bg-slate-700 transition-colors group border border-gray-700 hover:border-gray-500">
-                                                <div className="flex-grow">
-                                                    <div className="text-circuit-teal text-sm font-medium group-hover:underline line-clamp-1">{chunk.web.title}</div>
-                                                    <div className="text-gray-500 text-xs mt-1 truncate">{chunk.web.uri}</div>
-                                                </div>
-                                            </a>
-                                        ) : null
-                                    ))}
-                                </div>
-                            </div>
-                        )}
-                        
-                        <div className="p-4 bg-orange-900/20 border border-orange-900/50 rounded-xl text-orange-200/80 text-sm flex gap-3">
-                            <IconAlert className="w-5 h-5 flex-shrink-0" />
-                            <p>免责声明：本系统提供的维修建议仅供参考。请务必在断电状态下操作，高压电路具有生命危险。</p>
                         </div>
                     </div>
                 )}
@@ -431,70 +334,32 @@ const App: React.FC = () => {
         )}
 
         {viewMode === 'library' && (
-            <div className="animate-fade-in space-y-8">
-                <div className="text-center space-y-4">
-                    <h2 className="text-3xl font-bold text-white">自建问题库</h2>
-                    <p className="text-gray-400">导入历史维修记录。AI 在诊断时会优先核对这些数据，实现经验复用。</p>
-                </div>
-
+            <div className="space-y-8 animate-fade-in">
                 <div className="bg-slate-800/50 border border-gray-700 rounded-2xl p-8 backdrop-blur-sm">
-                    <div className="flex flex-col md:flex-row gap-8">
-                        <div className="flex-1">
-                            <label className="block text-sm font-medium text-gray-300 mb-4 flex items-center gap-2">
-                                <IconUpload className="w-4 h-4 text-circuit-teal" />
-                                上传知识库文件 (.xlsx / .json)
-                            </label>
-                            <div onClick={() => fileInputRef.current?.click()} className="border-2 border-dashed border-gray-600 rounded-xl p-8 flex flex-col items-center justify-center text-center hover:border-circuit-teal hover:bg-slate-800/80 transition-all cursor-pointer group h-64">
-                                <div className="bg-slate-700 p-4 rounded-full mb-4 group-hover:bg-circuit-teal/20 transition-colors">
-                                    <IconFileText className="w-8 h-8 text-gray-400 group-hover:text-circuit-teal" />
-                                </div>
-                                <p className="text-white font-medium mb-1">点击选择或拖拽文件</p>
-                                <p className="text-gray-500 text-xs">自动解析“故障现象”与“维修分析”列</p>
-                                <input type="file" ref={fileInputRef} accept=".json, .xlsx, .xls" onChange={handleFileUpload} className="hidden" />
-                            </div>
-                            {errorMsg && <div className="mt-4 p-3 bg-red-900/20 border border-red-800 rounded-lg text-red-200 text-sm flex items-center gap-2"><IconAlert className="w-4 h-4" />{errorMsg}</div>}
-                        </div>
-
-                        <div className="flex-1 bg-slate-900 rounded-xl border border-gray-700 p-6">
-                            <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">Excel 列名匹配说明</h3>
-                            <ul className="text-sm text-gray-300 space-y-2 mb-4">
-                                <li className="flex items-start gap-2"><span className="text-circuit-teal font-mono">故障描述</span>: 必填。匹配故障现象。</li>
-                                <li className="flex items-start gap-2"><span className="text-circuit-teal font-mono">问题分析</span>: 必填。存储历史维修方案。</li>
-                                <li className="flex items-start gap-2"><span className="text-circuit-teal font-mono">设备名称</span>: 选填。</li>
-                            </ul>
-                        </div>
+                    <h3 className="text-xl font-bold text-white mb-6">导入历史记录库</h3>
+                    <div onClick={() => fileInputRef.current?.click()} className="border-2 border-dashed border-gray-600 rounded-xl p-12 flex flex-col items-center justify-center cursor-pointer hover:border-circuit-teal hover:bg-slate-800 group">
+                        <IconFileText className="w-12 h-12 text-gray-500 group-hover:text-circuit-teal mb-4" />
+                        <p className="text-white font-medium">选择 Excel 或 JSON 文件</p>
+                        <input type="file" ref={fileInputRef} accept=".json, .xlsx, .xls" onChange={handleFileUpload} className="hidden" />
                     </div>
                 </div>
-
                 {libraryItems.length > 0 && (
-                    <div className="space-y-4">
-                        <div className="flex items-center justify-between">
-                            <h3 className="text-xl font-bold text-white flex items-center gap-2"><IconList className="w-5 h-5 text-circuit-teal" /> 已加载条目 ({libraryItems.length})</h3>
-                            <button onClick={() => setLibraryItems([])} className="text-xs text-red-400 hover:text-red-300">清空库</button>
-                        </div>
-                        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                            {libraryItems.map((item) => (
-                                <div key={item.id} className="bg-slate-800 border border-gray-700 rounded-xl p-5 hover:border-circuit-teal/50 transition-colors group flex flex-col justify-between relative overflow-hidden">
-                                    {item.analysis && <div className="absolute top-0 right-0 bg-green-500/20 text-green-400 text-[10px] px-2 py-1 rounded-bl-lg border-b border-l border-green-500/20 font-bold">含存档方案</div>}
-                                    <div>
-                                        <h4 className="text-white font-semibold text-lg mb-1 truncate">{item.name}</h4>
-                                        <p className="text-gray-400 text-sm line-clamp-2 mb-4 h-10">{item.description}</p>
-                                    </div>
-                                    <button onClick={() => selectLibraryItem(item)} className={`w-full py-2 rounded-lg text-sm font-semibold transition-all flex items-center justify-center gap-2 ${item.analysis ? 'bg-slate-700 text-green-400 hover:bg-green-500/20' : 'bg-slate-700 hover:bg-circuit-teal hover:text-slate-900 text-circuit-teal'}`}>
-                                        {item.analysis ? <><IconFileText className="w-3 h-3" /> 查看方案 / AI 扩充</> : <><IconWrench className="w-3 h-3" /> 开始 AI 诊断</>}
-                                    </button>
-                                </div>
-                            ))}
-                        </div>
+                    <div className="grid gap-4 md:grid-cols-2">
+                        {libraryItems.map((item) => (
+                            <div key={item.id} onClick={() => selectLibraryItem(item)} className="bg-slate-800 border border-gray-700 p-6 rounded-xl hover:border-circuit-teal cursor-pointer transition-all">
+                                <h4 className="text-white font-bold mb-2">{item.name}</h4>
+                                <p className="text-gray-400 text-sm line-clamp-2">{item.description}</p>
+                            </div>
+                        ))}
                     </div>
                 )}
             </div>
         )}
       </main>
 
-      <footer className="border-t border-gray-800 bg-slate-900/50 py-6 mt-8">
-        <div className="max-w-4xl mx-auto px-4 text-center text-gray-600 text-sm">
-          <p>© {new Date().getFullYear()} 产品部维修专家. Powered by Google Gemini 3.0 Pro.</p>
+      <footer className="border-t border-gray-800 bg-slate-900/50 py-6">
+        <div className="max-w-4xl mx-auto px-4 text-center text-gray-600 text-xs uppercase tracking-widest">
+          © {new Date().getFullYear()} 产品部维修专家 · 授权访问模式
         </div>
       </footer>
     </div>
