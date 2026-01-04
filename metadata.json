@@ -1,0 +1,7 @@
+{
+  "name": "产品部维修专家",
+  "description": "智能电子元器件维修顾问。结合AI深度分析与实时网络搜索，为您提供专业的故障诊断与维修方案。",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
